@@ -17,8 +17,6 @@ on:
           - "20:00"
   schedule:
     # UTC = Asia/Bangkok (UTC+7) minus 7 hours
-    # 07:00->00:00 | 08:00->01:00 | 09:00->02:00
-    # 12:00->05:00 | 13:00->06:00 | 19:00->12:00 | 20:00->13:00
     - cron: "0 0,1,2,5,6,12,13 * * *"
 
 permissions:
@@ -30,8 +28,6 @@ concurrency:
 
 jobs:
   capture:
-    # Self-hosted runner inside the corporate network (macOS).
-    # Use ubuntu-latest ONLY if Grafana is reachable from the public internet.
     runs-on: [self-hosted, macOS, X64]
     timeout-minutes: 20
 
@@ -47,14 +43,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
+      # ✅ ใช้ python3 ของเครื่อง + venv (แทน actions/setup-python)
+      - name: Create virtualenv
+        run: |
+          python3 -m venv venv
+          echo "${{ github.workspace }}/venv/bin" >> $GITHUB_PATH
 
       - name: Install Python dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python --version
+          pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Install Playwright Chromium
         run: python -m playwright install chromium
