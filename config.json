@@ -1,0 +1,21 @@
+{
+  "sheet": "Report",
+  "date_cell": "A1",
+  "urls": {
+    "cpu":      "https://grafana.th2p.ascendmoney.io/d/d2a87cf6-7cde-4c37-8c53-65e6af180bb0/nutanix-prism-central-exporter?orgId=2&viewPanel=5&kiosk&from=now-1h&to=now",
+    "mem":      "https://grafana.th2p.ascendmoney.io/d/d2a87cf6-7cde-4c37-8c53-65e6af180bb0/nutanix-prism-central-exporter?orgId=2&viewPanel=6&kiosk&from=now-1h&to=now",
+    "storage":  "https://grafana.th2p.ascendmoney.io/d/d2a87cf6-7cde-4c37-8c53-65e6af180bb0/nutanix-prism-central-exporter?orgId=2&viewPanel=13&kiosk&from=now-1h&to=now",
+    "sysops":   "https://grafana.th2p.ascendmoney.io/d/xQa4nJY4k/sysops-overview-all-resource-on-premise-copy?orgId=2&viewPanel=53&kiosk&from=now-1h&to=now",
+    "iops":     "https://grafana.th2p.ascendmoney.io/d/d2a87cf6-7cde-4c37-8c53-65e6af180bb0/nutanix-prism-central-exporter?orgId=2&viewPanel=8&kiosk&from=now-1h&to=now",
+    "disk_lat": "https://grafana.th2p.ascendmoney.io/d/d2a87cf6-7cde-4c37-8c53-65e6af180bb0/nutanix-prism-central-exporter?orgId=2&viewPanel=7&kiosk&from=now-1h&to=now"
+  },
+  "anchors": {
+    "07:00": { "cpu": "B8",   "mem": "B28",  "storage": "B48",  "sysops": "B68",  "iops": "B90",  "disk_lat": "B110" },
+    "08:00": { "cpu": "J8",   "mem": "J28",  "storage": "J48",  "sysops": "J68",  "iops": "J90",  "disk_lat": "J110" },
+    "09:00": { "cpu": "R8",   "mem": "R28",  "storage": "R48",  "sysops": "R68",  "iops": "R90",  "disk_lat": "R110" },
+    "12:00": { "cpu": "Z8",   "mem": "Z28",  "storage": "Z48",  "sysops": "Z68",  "iops": "Z90",  "disk_lat": "Z110" },
+    "13:00": { "cpu": "AH8",  "mem": "AH28", "storage": "AH48", "sysops": "AH68", "iops": "AH90", "disk_lat": "AH110" },
+    "19:00": { "cpu": "AP8",  "mem": "AP28", "storage": "AP48", "sysops": "AP68", "iops": "AP90", "disk_lat": "AP110" },
+    "20:00": { "cpu": "AX8",  "mem": "AX28", "storage": "AX48", "sysops": "AX68", "iops": "AX90", "disk_lat": "AX110" }
+  }
+}
