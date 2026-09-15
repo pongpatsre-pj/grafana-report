@@ -30,7 +30,7 @@ jobs:
   capture:
     # Use ubuntu-latest ONLY if Grafana is reachable from the public internet.
     # For VPN / internal Grafana, use a self-hosted runner inside the network.
-    runs-on: [self-hosted, linux, grafana]
+    runs-on: [self-hosted, macOS, X64]
     timeout-minutes: 20
 
     env:
