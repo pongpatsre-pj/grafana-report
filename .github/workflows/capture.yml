@@ -1,0 +1,93 @@
+name: Capture Grafana report
+
+on:
+  workflow_dispatch:
+    inputs:
+      slot:
+        description: "Capture slot (Bangkok time)"
+        required: true
+        type: choice
+        options:
+          - "07:00"
+          - "08:00"
+          - "09:00"
+          - "12:00"
+          - "13:00"
+          - "19:00"
+          - "20:00"
+  schedule:
+    # UTC = Asia/Bangkok (UTC+7) minus 7 hours
+    - cron: "0 0,1,2,5,6,12,13 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: grafana-report
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    # Use ubuntu-latest ONLY if Grafana is reachable from the public internet.
+    # For VPN / internal Grafana, use a self-hosted runner inside the network.
+    runs-on: [self-hosted, linux, grafana]
+    timeout-minutes: 20
+
+    env:
+      TZ: Asia/Bangkok
+      SLOT: ${{ inputs.slot || '' }}
+      SCHEDULE: ${{ github.event.schedule || '' }}
+      GRAFANA_STORAGE_STATE_B64: ${{ secrets.GRAFANA_STORAGE_STATE_B64 }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Restore Grafana session
+        shell: bash
+        run: |
+          if [ -z "$GRAFANA_STORAGE_STATE_B64" ]; then
+            echo "::error::Secret GRAFANA_STORAGE_STATE_B64 is not set"
+            exit 1
+          fi
+          printf '%s' "$GRAFANA_STORAGE_STATE_B64" | base64 --decode > storage_state.json
+          chmod 600 storage_state.json
+
+      - name: Capture screenshots and update Excel
+        run: python capture.py
+
+      - name: Upload workbook artifact
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: grafana-report-${{ github.run_number }}
+          path: |
+            reports/*.xlsx
+            screenshots/
+          retention-days: 30
+
+      - name: Commit updated workbook
+        shell: bash
+        run: |
+          git config user.name  "grafana-report-bot"
+          git config user.email "grafana-report-bot@users.noreply.github.com"
+          git add reports/
+          if git diff --cached --quiet; then
+            echo "No workbook changes"
+            exit 0
+          fi
+          git commit -m "Update Grafana report [skip ci]"
+          git push origin HEAD:${GITHUB_REF_NAME}
