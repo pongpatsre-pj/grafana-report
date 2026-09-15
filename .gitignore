@@ -1,0 +1,4 @@
+storage_state.json
+screenshots/
+__pycache__/
+*.pyc
