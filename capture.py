@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-"""
-Capture Grafana panels and insert them into a pre-made Excel template.
-"""
 
 import json
 import os
@@ -13,7 +10,6 @@ from zoneinfo import ZoneInfo
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.utils import get_column_letter
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 TZ = ZoneInfo("Asia/Bangkok")
@@ -33,19 +29,18 @@ CFG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
 NOW = datetime.now(TZ)
 
 
-def resolve_slot() -> str:
-    slot = os.getenv("SLOT", "").strip()
-    schedule = os.getenv("SCHEDULE", "").strip()
+def resolve_slot():
+    slot = (os.getenv("SLOT") or "").strip()
 
     if not slot:
-        slot = SLOT_BY_CRON.get(schedule)
+        slot = SLOT_BY_CRON.get(
+            (os.getenv("SCHEDULE") or "").strip()
+        )
 
     if slot not in CFG["anchors"]:
         print(
-            f"ERROR: unknown slot {slot!r}; "
-            f"known={list(CFG['anchors'])}; "
-            f"SLOT={os.getenv('SLOT')!r}; "
-            f"SCHEDULE={schedule!r}",
+            f"ERROR: unknown slot={slot!r}; "
+            f"known={list(CFG['anchors'])}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -53,7 +48,7 @@ def resolve_slot() -> str:
     return slot
 
 
-def anchor_of(img) -> str:
+def anchor_of(img):
     anchor = img.anchor
 
     if isinstance(anchor, str):
@@ -65,23 +60,37 @@ def anchor_of(img) -> str:
     )
 
 
-def drop_old_image(ws, cell: str) -> None:
-    """Remove an image already anchored at the specified Excel cell."""
+def drop_old_image(ws, cell):
     for img in list(ws._images):
         if anchor_of(img) == cell:
             ws._images.remove(img)
 
 
-def ensure_logged_in(page, metric: str) -> None:
-    current_url = page.url.lower()
+def row_height(ws, row):
+    # Excel row height is in points; convert approximately to pixels.
+    points = ws.row_dimensions[row].height or 15
+    return points * 1.333
 
-    if "/login" in current_url:
-        raise RuntimeError(
-            f"Grafana session expired while opening {metric}: {page.url}"
+
+def calculate_image_height(ws, cell, next_cell=None):
+    """
+    Calculate image height from the space before the next anchor.
+    This prevents images at A88/A94 or A214/A220 from overlapping.
+    """
+    current_row = ws[cell].row
+
+    if next_cell:
+        next_row = ws[next_cell].row
+        available = sum(
+            row_height(ws, row)
+            for row in range(current_row, next_row)
         )
+        return max(70, int(available - 8))
+
+    return 300
 
 
-def main() -> None:
+def main():
     slot = resolve_slot()
     date = NOW.strftime("%Y-%m-%d")
 
@@ -97,15 +106,14 @@ def main() -> None:
     source = report_path if report_path.exists() else template_path
 
     if not source.exists():
-        print(f"ERROR: Excel source not found: {source}", file=sys.stderr)
+        print(f"ERROR: Excel file not found: {source}", file=sys.stderr)
         sys.exit(1)
 
-    state = ROOT / "storage_state.json"
+    state_path = ROOT / "storage_state.json"
 
-    if not state.exists():
+    if not state_path.exists():
         print(
-            "ERROR: storage_state.json missing "
-            "(restore it from GRAFANA_STORAGE_STATE_B64)",
+            "ERROR: storage_state.json missing",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -113,86 +121,90 @@ def main() -> None:
     wb = load_workbook(source)
 
     sheet_name = CFG["sheet"]
+
     if sheet_name not in wb.sheetnames:
         print(
-            f"ERROR: worksheet {sheet_name!r} not found. "
-            f"Available sheets: {wb.sheetnames}",
+            f"ERROR: worksheet {sheet_name!r} not found; "
+            f"available={wb.sheetnames}",
             file=sys.stderr,
         )
         sys.exit(1)
 
     ws = wb[sheet_name]
+
+    # Preserve the order from config.json.
+    metrics = list(CFG["urls"].items())
     anchors = CFG["anchors"][slot]
-    failures = []
+
+    if len(metrics) != len(anchors):
+        print(
+            f"ERROR: URL count ({len(metrics)}) does not match "
+            f"anchor count ({len(anchors)})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     with sync_playwright() as p:
-        with p.chromium.launch(headless=True) as browser:
-            ctx = browser.new_context(
-                storage_state=str(state),
-                viewport={"width": 1600, "height": 1000},
-                locale="en-US",
-                # Required temporarily because the internal Grafana
-                # certificate has a hostname/CA mismatch.
-                ignore_https_errors=True,
+        browser = p.chromium.launch(headless=True)
+
+        context = browser.new_context(
+            storage_state=str(state_path),
+            viewport={"width": 1600, "height": 1000},
+            locale="en-US",
+            ignore_https_errors=True
+        )
+
+        page = context.new_page()
+        page.set_default_timeout(60_000)
+
+        for index, ((metric, url), cell) in enumerate(
+            zip(metrics, anchors),
+            start=1
+        ):
+            print(f"[{slot}] image {index}/7: {metric} -> {cell}")
+
+            page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=60_000
             )
 
-            page = ctx.new_page()
-            page.set_default_timeout(60_000)
-            page.set_default_navigation_timeout(60_000)
+            if "/login" in page.url.lower():
+                raise RuntimeError(
+                    "Grafana session expired; update "
+                    "GRAFANA_STORAGE_STATE_B64"
+                )
 
-            for metric, url in CFG["urls"].items():
-                if metric not in anchors:
-                    print(f"Skipping {metric}: no Excel anchor configured")
-                    continue
+            page.wait_for_timeout(8_000)
 
-                print(f"[{slot}] capturing {metric} ...")
+            png_path = shots_dir / f"{index:02d}_{metric}.png"
+            page.screenshot(
+                path=str(png_path),
+                full_page=True
+            )
 
-                try:
-                    page.goto(
-                        url,
-                        wait_until="domcontentloaded",
-                        timeout=60_000,
-                    )
+            next_cell = (
+                anchors[index]
+                if index < len(anchors)
+                else None
+            )
 
-                    # Check immediately after navigation.
-                    ensure_logged_in(page, metric)
+            image_height = calculate_image_height(
+                ws,
+                cell,
+                next_cell
+            )
 
-                    # Allow Grafana panels and charts to render.
-                    page.wait_for_timeout(8_000)
+            drop_old_image(ws, cell)
 
-                    # Check again in case Grafana redirected after loading.
-                    ensure_logged_in(page, metric)
+            image = XLImage(str(png_path))
+            image.width = 520
+            image.height = image_height
 
-                    png = shots_dir / f"{metric}.png"
-                    page.screenshot(
-                        path=str(png),
-                        full_page=True,
-                    )
+            ws.add_image(image, cell)
 
-                    cell = anchors[metric]
-                    drop_old_image(ws, cell)
-
-                    img = XLImage(str(png))
-                    img.width = 520
-                    img.height = 300
-                    ws.add_image(img, cell)
-
-                    print(f"[{slot}] OK: {metric} -> {png}")
-
-                except (PlaywrightTimeoutError, Exception) as exc:
-                    message = f"{metric}: {type(exc).__name__}: {exc}"
-                    print(f"ERROR: {message}", file=sys.stderr)
-                    failures.append(message)
-
-            ctx.close()
-
-    if failures:
-        print("\nCapture failed for one or more metrics:", file=sys.stderr)
-        for failure in failures:
-            print(f"- {failure}", file=sys.stderr)
-
-        # Do not save/commit a partially updated workbook.
-        sys.exit(2)
+        context.close()
+        browser.close()
 
     ws[CFG["date_cell"]] = NOW.strftime("%d %b %Y")
     wb.save(report_path)
