@@ -1,97 +1,158 @@
-name: Capture Grafana report
+#!/usr/bin/env python3
+"""
+Capture Grafana panels and insert them into a pre-made Excel template.
+Slot is chosen by the GitHub Actions schedule (UTC) or workflow_dispatch input.
+"""
+import json
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
-on:
-  workflow_dispatch:
-    inputs:
-      slot:
-        description: "Capture slot (Bangkok time)"
-        required: true
-        type: choice
-        options:
-          - "07:00"
-          - "08:00"
-          - "09:00"
-          - "12:00"
-          - "13:00"
-          - "19:00"
-          - "20:00"
-  schedule:
-    # UTC = Asia/Bangkok (UTC+7) minus 7 hours
-    - cron: "0 0,1,2,5,6,12,13 * * *"
+from openpyxl import load_workbook
+from openpyxl.drawing.image import Image as XLImage
+from openpyxl.utils import get_column_letter
+from playwright.sync_api import sync_playwright
 
-permissions:
-  contents: write
+TZ = ZoneInfo("Asia/Bangkok")
 
-concurrency:
-  group: grafana-report
-  cancel-in-progress: false
+SLOT_BY_CRON = {
+    "0 0 * * *":  "07:00",
+    "0 1 * * *":  "08:00",
+    "0 2 * * *":  "09:00",
+    "0 5 * * *":  "12:00",
+    "0 6 * * *":  "13:00",
+    "0 12 * * *": "19:00",
+    "0 13 * * *": "20:00",
+}
 
-jobs:
-  capture:
-    runs-on: [self-hosted, macOS, X64]
-    timeout-minutes: 20
+ROOT = Path(__file__).resolve().parent
+CFG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+NOW = datetime.now(TZ)
 
-    env:
-      TZ: Asia/Bangkok
-      SLOT: ${{ inputs.slot || '' }}
-      SCHEDULE: ${{ github.event.schedule || '' }}
-      GRAFANA_STORAGE_STATE_B64: ${{ secrets.GRAFANA_STORAGE_STATE_B64 }}
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+def resolve_slot() -> str:
+    slot = (os.getenv("SLOT") or "").strip()
+    schedule = (os.getenv("SCHEDULE") or "").strip()
+    if not slot:
+        slot = SLOT_BY_CRON.get(schedule)
 
-      # ✅ ใช้ python3 ของเครื่อง + venv (แทน actions/setup-python)
-      - name: Create virtualenv
-        run: |
-          python3 -m venv venv
-          echo "${{ github.workspace }}/venv/bin" >> $GITHUB_PATH
+    if slot not in CFG["anchors"]:
+        print(f"ERROR: unknown slot {slot!r}. "
+              f"known={list(CFG['anchors'])} SLOT={os.getenv('SLOT')!r} "
+              f"SCHEDULE={schedule!r}", file=sys.stderr)
+        sys.exit(1)
+    return slot
 
-      - name: Install Python dependencies
-        run: |
-          python --version
-          pip install --upgrade pip
-          pip install -r requirements.txt
 
-      - name: Install Playwright Chromium
-        run: python -m playwright install chromium
+def anchor_of(img) -> str:
+    a = img.anchor
+    if isinstance(a, str):
+        return a
+    return f"{get_column_letter(a._from.col + 1)}{a._from.row + 1}"
 
-      - name: Restore Grafana session
-        shell: bash
-        run: |
-          if [ -z "$GRAFANA_STORAGE_STATE_B64" ]; then
-            echo "::error::Secret GRAFANA_STORAGE_STATE_B64 is not set"
-            exit 1
-          fi
-          printf '%s' "$GRAFANA_STORAGE_STATE_B64" | base64 -D > storage_state.json
-          chmod 600 storage_state.json
 
-      - name: Capture screenshots and update Excel
-        run: python capture.py
+def drop_old_image(ws, cell: str) -> None:
+    """Remove any image already anchored at `cell` so re-runs don't duplicate."""
+    for img in list(ws._images):
+        if anchor_of(img) == cell:
+            ws._images.remove(img)
 
-      - name: Upload workbook artifact
-        uses: actions/upload-artifact@v4
-        if: ${{ !cancelled() }}
-        with:
-          name: grafana-report-${{ github.run_number }}
-          path: |
-            reports/*.xlsx
-            screenshots/
-          if-no-files-found: ignore
-          retention-days: 30
 
-      - name: Commit updated workbook
-        shell: bash
-        run: |
-          mkdir -p reports
-          git config user.name  "grafana-report-bot"
-          git config user.email "grafana-report-bot@users.noreply.github.com"
-          git add reports/
-          if git diff --cached --quiet; then
-            echo "No workbook changes"
-            exit 0
-          fi
-          git commit -m "Update Grafana report [skip ci]"
-          git push origin HEAD:${GITHUB_REF_NAME}
+def ensure_logged_in(page, metric: str) -> None:
+    if "/login" in page.url.lower():
+        raise RuntimeError(f"Grafana session expired while opening {metric}: {page.url}")
+
+
+def main() -> None:
+    slot = resolve_slot()
+    date = NOW.strftime("%Y-%m-%d")
+
+    reports_dir = ROOT / "reports"
+    shots_dir = ROOT / "screenshots" / date / slot.replace(":", "")
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    shots_dir.mkdir(parents=True, exist_ok=True)
+
+    report_path = reports_dir / f"{date}.xlsx"
+    template_path = ROOT / "template.xlsx"
+    source = report_path if report_path.exists() else template_path
+    if not source.exists():
+        print(f"ERROR: Excel source not found: {source}", file=sys.stderr)
+        sys.exit(1)
+
+    state = ROOT / "storage_state.json"
+    if not state.exists():
+        print("ERROR: storage_state.json missing "
+              "(restore from GRAFANA_STORAGE_STATE_B64)", file=sys.stderr)
+        sys.exit(1)
+
+    wb = load_workbook(source)
+
+    sheet_name = CFG["sheet"]
+    if sheet_name not in wb.sheetnames:
+        print(f"ERROR: worksheet {sheet_name!r} not found. "
+              f"available={wb.sheetnames}", file=sys.stderr)
+        sys.exit(1)
+
+    ws = wb[sheet_name]
+    anchors = CFG["anchors"][slot]
+    failures: list[str] = []
+
+    with sync_playwright() as p:
+        with p.chromium.launch(headless=True) as browser:
+            ctx = browser.new_context(
+                storage_state=str(state),
+                viewport={"width": 1600, "height": 1000},
+                locale="en-US",
+                # จำเป็นชั่วคราว: cert ของ grafana.th2p ยังมี SAN ไม่ตรง (th1p)
+                ignore_https_errors=True,
+            )
+            page = ctx.new_page()
+            page.set_default_timeout(60_000)
+            page.set_default_navigation_timeout(60_000)
+
+            for metric, url in CFG["urls"].items():
+                if metric not in anchors:
+                    print(f"skip {metric} (no anchor for slot {slot})")
+                    continue
+
+                print(f"[{slot}] capturing {metric} ...")
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+                    ensure_logged_in(page, metric)      # เช็คทันทีหลัง goto
+
+                    page.wait_for_timeout(8_000)        # ให้ panel render เสร็จ
+
+                    ensure_logged_in(page, metric)      # เผื่อ redirect หลังโหลด
+                    png = shots_dir / f"{metric}.png"
+                    page.screenshot(path=str(png), full_page=True)
+
+                    cell = anchors[metric]
+                    drop_old_image(ws, cell)
+                    img = XLImage(str(png))
+                    img.width, img.height = 520, 300
+                    ws.add_image(img, cell)
+
+                    print(f"[{slot}] OK: {metric} -> {png}")
+                except Exception as exc:                # ไม่ให้ panel เดียวฆ่าทั้ง run
+                    msg = f"{metric}: {type(exc).__name__}: {exc}"
+                    print(f"ERROR: {msg}", file=sys.stderr)
+                    failures.append(msg)
+
+            ctx.close()
+
+    if failures:
+        print("\nCapture failed:", file=sys.stderr)
+        for f in failures:
+            print(f"- {f}", file=sys.stderr)
+        # อย่า save/commit Excel ที่ได้ภาพไม่ครบ
+        sys.exit(2)
+
+    ws[CFG["date_cell"]] = NOW.strftime("%d %b %Y")
+    wb.save(report_path)
+    print(f"OK -> {report_path}")
+
+
+if __name__ == "__main__":
+    main()
